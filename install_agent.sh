@@ -41,6 +41,15 @@ else
     perl -c -I/usr/share/perl5 "$ZFS_PM" 2>&1 | tail -1
 fi
 
+# Newer PVE (9.x) also resolves the zvol base path in on_add_hook, which dies for unknown providers.
+if grep -q 'sub on_add_hook' "$ZFS_PM" && ! grep -q 'base_path = PVE::Storage::LunCmd::OviOSiSCSI' "$ZFS_PM"; then
+    echo "Patching ZFSPlugin.pm on_add_hook"
+    perl -0pi -e '
+        s/^([ \t]*)(\} elsif \(\$scfg->\{iscsiprovider\} eq .istgt.\) \{\n[ \t]*\$base_path = PVE::Storage::LunCmd::Istgt::get_base[^\n]*\n)/$1$2$1\} elsif (\$scfg->{iscsiprovider} eq \x27OVIOS\x27) {\n$1    \$base_path = PVE::Storage::LunCmd::OviOSiSCSI::get_base(\$scfg);\n/m
+            or die "ZFSPlugin.pm: on_add_hook anchor not found - file layout changed\n";
+    ' "$ZFS_PM"
+fi
+
 echo "Patching pvemanagerlib.js"
 if grep -q "'OVIOS'" "$PVE_JS"; then
     echo "  already patched, skipping"
