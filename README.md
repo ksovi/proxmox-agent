@@ -79,6 +79,24 @@ ssh -i /etc/pve/priv/zfs/192.168.43.166_id_rsa root@192.168.43.166
 `/etc/pve` is shared across the cluster, so the key only needs to be created once. If ssh-copy-id
 isn't possible, append the `.pub` contents to `/root/.ssh/authorized_keys` on OviOS.
 
+### HA OviOS clusters (VIP)
+
+If the storage is an OviOS HA cluster and Proxmox connects to its **virtual IP**, disable SSH host
+key checking for that address on **every Proxmox node**. After a failover the VIP is answered by a
+different node with a different host key; with strict checking SSH refuses the connection and
+Proxmox loses access to the VM disks.
+
+Add to `/root/.ssh/config` on each Proxmox node (use your VIP):
+
+```
+Host 10.0.0.108
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+```
+
+This turns off server identity verification for that host, so only do it for the VIP on a trusted
+storage network. Alternatively, give both OviOS nodes the same SSH host keys.
+
 ## Add the storage
 
 *Datacenter → Storage → Add → ZFS over iSCSI*
