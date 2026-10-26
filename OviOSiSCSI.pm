@@ -1,7 +1,7 @@
 package PVE::Storage::LunCmd::OviOSiSCSI;
 
 # iscsi storage running on OviOS Linux
-# ovios.org 
+# ovios.org
 # On one of the proxmox nodes:
 # 1) Login as root
 # 2) ssh-copy-id <ip_of_iscsi_storage>
@@ -9,76 +9,29 @@ package PVE::Storage::LunCmd::OviOSiSCSI;
 use strict;
 use warnings;
 
-use PVE::Tools qw(run_command file_read_firstline trim dir_glob_regex dir_glob_foreach);
+use PVE::Tools qw(run_command);
 
 sub get_base;
 
-my $MAX_LUNS = 16864;
-my $SETTINGS = undef;
-my @ssh_opts = ('-q','-o', 'BatchMode=yes');
+my $MAX_LUNS = 16384;
+my @ssh_opts = ('-q', '-o', 'BatchMode=yes');
 my @ssh_cmd = ('/usr/bin/ssh', @ssh_opts);
-my @scp_cmd = ('/usr/bin/scp', @ssh_opts);
 my $id_rsa_path = '/etc/pve/priv/zfs';
 my $tgtadm = '/usr/sbin/tgtadm';
+my $zfs = '/usr/sbin/zfs';
 
+# Live state of the target we are talking to: { tid => N, luns => [ {lun, Path, include} ] }
+# It is re-read from the OviOS box on every run_lun_command, because the pve
+# workers are long lived and other workers/nodes change the target behind our back.
+my $SETTINGS = undef;
+
+# Runs "$method @params" on the OviOS box over ssh. Returns { result => 0|1, msg => ... }.
 my $execute_command = sub {
-    my ($scfg, $exec, $timeout, $method, @params) = @_;
+    my ($scfg, $timeout, $method, @params) = @_;
 
     my $msg = '';
-    my $err = undef;
-    my $target;
-    my $cmd;
-    my $res = ();
+    my $err = '';
 
-    $timeout = 10 if !$timeout;
-
-    my $output = sub {
-    my $line = shift;
-    $msg .= "$line\n";
-    };
-
-    my $errfunc = sub {
-    my $line = shift;
-    $err .= "$line";
-    };
-    if ($exec eq 'legacy') {
-        $target = 'root@' . $scfg->{portal};
-        $cmd = "/usr/bin/ssh -o BatchMode=yes -i $id_rsa_path/$scfg->{portal}_id_rsa $target $method";
-        $res = system($cmd);
-        return $res;
-    } elsif ($exec eq 'scp') {
-        $target = 'root@[' . $scfg->{portal} . ']';
-        $cmd = [@scp_cmd, '-i', "$id_rsa_path/$scfg->{portal}_id_rsa", '--', $method, "$target:$params[0]"];
-    } else {
-        $target = 'root@' . $scfg->{portal};
-        $cmd = [@ssh_cmd, '-i', "$id_rsa_path/$scfg->{portal}_id_rsa", $target, '--', $method, @params];
-    }
-
-    eval {
-        run_command($cmd, outfunc => $output, errfunc => $errfunc, timeout => $timeout);
-    };
-    if ($@) {
-        $res = {
-            result => 0,
-            msg => $err,
-        }
-    } else {
-        $res = {
-            result => 1,
-            msg => $msg,
-        }
-    }
-
-    return $res;
-};
-
-my $read_config = sub {
-    my ($scfg, $timeout) = @_;
-    # always getting config from the live state of the system, meaning mapped luns only
-    my $msg = '';
-    my $err = undef;
-    my $luncmd = '/usr/sbin/tgtadm --lld iscsi --mode target --op show | /bin/grep -E "Target | LUN: | Backing store path:"';
-    my $target;
     $timeout = 10 if !$timeout;
 
     my $output = sub {
@@ -88,246 +41,167 @@ my $read_config = sub {
 
     my $errfunc = sub {
         my $line = shift;
-        $err .= "$line";
+        $err .= "$line\n";
     };
 
-    $target = 'root@' . $scfg->{portal};
+    my $target = 'root@' . $scfg->{portal};
+    my $cmd = [@ssh_cmd, '-i', "$id_rsa_path/$scfg->{portal}_id_rsa", $target, '--', $method, @params];
 
-    my $cmd = [@ssh_cmd, '-i', "$id_rsa_path/$scfg->{portal}_id_rsa", $target, "$luncmd" ];
     eval {
         run_command($cmd, outfunc => $output, errfunc => $errfunc, timeout => $timeout);
     };
-    return $msg;
-};
-
-my $get_config = sub {
-    my ($scfg) = @_;
-    my @conf = undef;
-    my $config = $read_config->($scfg, undef);
-    return $config;
-};
-
-my $parser = sub {
-    my ($scfg) = @_;
-    my $line = 0;
-    my $base = get_base;
-    my $config = $get_config->($scfg);
-    my @ovioscfg = split "\n", $config;
-    my $tn =undef;
-    my $cfg_target = 0;
-    foreach (@ovioscfg) {
-        $line++;
-        $_ =~ s/^\s+//;
-        if ($_ =~ /Target /) {
-            my @oviostg = split / /, $_, 3;
-            $tn = $oviostg[2];
-            if ($tn eq $scfg->{target} && ! $cfg_target) {
-                $SETTINGS->{target} = $tn;
-                $cfg_target = 1;
-                } elsif ($tn eq $scfg->{target} && $cfg_target) {
-                    die "$line: Parse error [$_]";
-                } else {
-                    $cfg_target = 0;
-			}
-        } else {
-		    if ($cfg_target) {
-                my @oviostg = split / /, $_, 7;
-                my $lid = $oviostg[1];
-                my $indexer = $line;
-                if ($lid =~ /\d+/ && $lid != 0 ) {
-                    my $path = $ovioscfg[$indexer++];
-                    $path =~ s/^\s+|\s+$//g;
-                    $path =~ s/Backing store path: //g;
-                    $indexer = undef;
-                    my $conf = undef;
-                    $conf->{Path} = $path;
-                    if ($conf->{Path} && $conf->{Path} =~ /^$base\/$scfg->{pool}\/([\w\-]+)$/) {
-                        $conf->{include} = 1;
-                    } else {
-                        $conf->{include} = 0;
-                    }
-                    $conf->{lun} = $lid;
-                    push @{$SETTINGS->{luns}}, $conf;
-                }
-		    }		
-        }
+    if (my $exc = $@) {
+        return { result => 0, msg => ($err ne '' ? $err : $exc) };
     }
+
+    return { result => 1, msg => $msg };
 };
 
-my $get_target_tid = sub {
+# Reads the mapped luns of $scfg->{target} from the live tgt state.
+my $parse_config = sub {
     my ($scfg) = @_;
-    my $tid = undef;
-    my $tn =undef;
-    my $ovioscommand = '/usr/sbin/tgtadm --lld iscsi --mode target --op show | /bin/grep Target';
-    my $res = $execute_command->($scfg, 'ssh', undef, $ovioscommand);
-    die $res->{msg} unless $res->{result};
-    my @cfg = split "\n", $res->{msg};
-    foreach (@cfg) {
-        if ($_ =~ /Target /) {
-            my @oviostg = split / /, $_, 3;
-            $tid =  $oviostg[1];
-            $tid =~ s/://g;
-            $tn = $oviostg[2];
-            if ($tn && $tn eq $scfg->{target}) {
-                $tid =~ s/://g;
-                last;
+
+    my $base = get_base();
+    my $listcmd = "$tgtadm --lld iscsi --mode target --op show"
+        . ' | /bin/grep -E "Target | LUN: | Backing store path:"';
+
+    my $res = $execute_command->($scfg, undef, $listcmd);
+    die "unable to read target configuration from $scfg->{portal}: $res->{msg}\n"
+        unless $res->{result};
+
+    my $settings = { tid => undef, luns => [] };
+    my $in_target = 0;
+    my $lun_id = undef;
+
+    foreach my $line (split /\n/, $res->{msg}) {
+        $line =~ s/^\s+|\s+$//g;
+
+        if ($line =~ /^Target\s+(\d+):\s*(\S+)/) {
+            $in_target = ($2 eq $scfg->{target});
+            $lun_id = undef;
+            if ($in_target) {
+                die "Parse error: target $scfg->{target} listed twice\n" if defined $settings->{tid};
+                $settings->{tid} = $1;
             }
+        } elsif ($in_target && $line =~ /^LUN:\s*(\d+)/) {
+            $lun_id = $1;
+        } elsif ($in_target && defined $lun_id && $line =~ /^Backing store path:\s*(.+)$/) {
+            my ($lun, $path) = ($lun_id, $1);
+            $lun_id = undef;
+            next if $lun == 0; # LUN 0 is the controller
+            push @{$settings->{luns}}, {
+                lun => $lun,
+                Path => $path,
+                include => ($path =~ m{^\Q$base/$scfg->{pool}\E/[\w.\-]+$}) ? 1 : 0,
+            };
         }
     }
-    return $tid;
+
+    die "target $scfg->{target} not found on $scfg->{portal}\n" if !defined $settings->{tid};
+
+    return $settings;
 };
 
-my $get_lu_name = sub {
-	my ($scfg, $path) = @_;
-    my $used = ();
-    my $i;								 
-    for ($i = 1; $i < $MAX_LUNS; $i++) {
-        $used->{$i} = 0;
-    }
-	foreach my $lun (@{$SETTINGS->{luns}}) {
-        $used->{$lun->{lun}} = 1;
-    }
-    $SETTINGS->{used} = $used;
-    $used = $SETTINGS->{used};
-    for ($i = 1; $i < $MAX_LUNS; $i++) {
-        last unless $used->{$i};
-    }
-    $SETTINGS->{used}->{$i} = 1;
-    return $i;
-};
-my $init_lu_name = sub {
-    my $used = ();
-
-    if (! exists($SETTINGS->{used})) {
-        for (my $i = 1; $i < $MAX_LUNS; $i++) {
-            $used->{$i} = 0;
-        }
-        $SETTINGS->{used} = $used;
-    }
-    foreach my $lun (@{$SETTINGS->{luns}}) {
-        $SETTINGS->{used}->{$lun->{lun}} = 1;
-    }
-};
-
-my $free_lu_name = sub {
-    my ($lu_name) = @_;
-    my $new;
+my $find_lun = sub {
+    my ($path) = @_;
 
     foreach my $lun (@{$SETTINGS->{luns}}) {
-        if ($lun->{lun} != $lu_name) {
-            push @$new, $lun;
-        }
+        next unless $lun->{include};
+        return $lun if $lun->{Path} eq $path;
     }
-
-    $SETTINGS->{luns} = $new;
-    $SETTINGS->{used}->{$lu_name} = 0;
+    return undef;
 };
 
-my $make_lun = sub {
-    my ($scfg, $path) = @_;
+my $get_free_lun_id = sub {
+    my %used = map { $_->{lun} => 1 } @{$SETTINGS->{luns}};
 
-    die 'Maximum number of LUNs per target is 16384' if scalar @{$SETTINGS->{luns}} >= $MAX_LUNS;
+    for (my $i = 1; $i < $MAX_LUNS; $i++) {
+        return $i if !$used{$i};
+    }
+    die "Maximum number of LUNs per target is $MAX_LUNS\n";
+};
 
-    my $lun = $get_lu_name->($scfg, $path);
-    my $conf = {
-        lun => $lun,
-        Path => $path,
-        include => 1,
-    };
-    push @{$SETTINGS->{luns}}, $conf;
+# Persist the running tgt config. Dump to a temp file first so a failing dump
+# can never truncate the existing targets.conf.
+my $update_config = sub {
+    my ($scfg) = @_;
 
-    return $conf;
+    my $conf = '/etc/tgt/targets.conf';
+    my $res = $execute_command->($scfg, undef,
+        "/usr/sbin/tgt-ovadmin --dump > $conf.new && [ -s $conf.new ] && mv -f $conf.new $conf");
+    warn "unable to update $conf on $scfg->{portal}: $res->{msg}\n" if !$res->{result};
+};
+
+# OviOS bookkeeping flags on the zvol.
+my $set_flags = sub {
+    my ($scfg, $timeout, $path, $mapped, $lun_id) = @_;
+
+    my $base = get_base();
+    (my $ds = $path) =~ s{^\Q$base\E/}{};
+
+    my @props = $mapped
+        ? ('lun:mapped=yes', 'lun:type=proxmox', "lun:id=$lun_id", "lun:tg-name=$scfg->{target}")
+        : ('lun:mapped=no', 'lun:type=none', 'lun:id=none', 'lun:tg-name=none');
+
+    my $res = $execute_command->($scfg, $timeout, $zfs, 'set', @props, $ds);
+    warn "unable to set OviOS lun flags on $ds: $res->{msg}\n" if !$res->{result};
+};
+
+my $add_logical_unit = sub {
+    my ($scfg, $timeout, $lun_id, $path) = @_;
+
+    my $res = $execute_command->($scfg, $timeout, $tgtadm, '--lld', 'iscsi', '--op', 'new',
+        '--mode', 'logicalunit', '--tid', $SETTINGS->{tid}, '--lun', $lun_id, '-b', $path);
+    die $res->{msg} unless $res->{result};
+};
+
+my $delete_logical_unit = sub {
+    my ($scfg, $timeout, $lun_id) = @_;
+
+    my $res = $execute_command->($scfg, $timeout, $tgtadm, '--lld', 'iscsi', '--op', 'delete',
+        '--mode', 'logicalunit', '--tid', $SETTINGS->{tid}, '--lun', $lun_id);
+    die $res->{msg} unless $res->{result};
 };
 
 my $list_view = sub {
     my ($scfg, $timeout, $method, @params) = @_;
-    my $lun = undef;
 
-    my $object = $params[0];
-    foreach my $lun (@{$SETTINGS->{luns}}) {
-        next unless $lun->{include} == 1;
-        if ($lun->{Path} =~ /^$object$/) {
-            return $lun->{lun} if (defined($lun->{lun}));
-            die "$lun->{Path}: Missing LUN";
-        }
-    }
-
-    return $lun;
+    my $lun = $find_lun->($params[0]);
+    return $lun ? $lun->{lun} : undef;
 };
 
 my $list_lun = sub {
     my ($scfg, $timeout, $method, @params) = @_;
-    my $name = undef;
-    my $object = $params[0];
-	if ( $SETTINGS->{target} ne $scfg->{target} ) {
-		$SETTINGS = undef;
-        $parser->($scfg);
-    }
-    foreach my $lun (@{$SETTINGS->{luns}}) {
-        next unless $lun->{include} == 1;
-        if ($lun->{Path} =~ /^$object$/) {
-            return $lun->{Path};
-        }
-    }
-    return $name;
+
+    my $lun = $find_lun->($params[0]);
+    return $lun ? $lun->{Path} : undef;
 };
 
 my $create_lun = sub {
     my ($scfg, $timeout, $method, @params) = @_;
 
-    if ($list_lun->($scfg, $timeout, $method, @params)) {
-        die "$params[0]: LUN exists";
-    }
-    my $lun = $params[0];
-    $lun = $make_lun->($scfg, $lun);
-    my $tid = $get_target_tid->($scfg);
-    my $path = "$lun->{Path}";
+    my $path = $params[0];
+    die "$path: LUN exists\n" if $find_lun->($path);
 
-    @params = ('--lld', 'iscsi', '--op', 'new','--mode', 'logicalunit',  "--tid $tid", "--lun $lun->{lun}", '-b', $path);
-    my $res = $execute_command->($scfg, 'ssh', $timeout, $tgtadm, @params);
-    do {
-        $free_lu_name->($lun->{lun});
-        die $res->{msg};
-    } unless $res->{result};
-    # update config 
-    my $tgtovadm = "'/usr/sbin/tgt-ovadmin --dump > /etc/tgt/targets.conf'";
-    @params = ("");
-    $execute_command->($scfg, 'legacy', undef, $tgtovadm);
-	# ovios flags
-    my $target_name = $scfg->{target};
-    my @dataset = split'/', $path;
-    my $ds = "$dataset[-2]/$dataset[-1]";
-	# ovios map lun
-    my $zfs = "/usr/sbin/zfs";
-    @params = (" set lun:mapped=yes lun:type=proxmox lun:id=$lun->{lun} lun:tg-name=$target_name $ds");
-    $execute_command->($scfg, 'ssh', $timeout, $zfs, @params);
-    return $res->{msg};
+    my $lun_id = $get_free_lun_id->();
+    $add_logical_unit->($scfg, $timeout, $lun_id, $path);
+
+    $update_config->($scfg);
+    $set_flags->($scfg, $timeout, $path, 1, $lun_id);
+
+    return $path;
 };
 
 my $delete_lun = sub {
     my ($scfg, $timeout, $method, @params) = @_;
-    my $res = {msg => undef};
 
-    my $path = $params[0];
-    my $tid = $get_target_tid->($scfg);
+    my $lun = $find_lun->($params[0]);
+    return '' if !$lun; # nothing mapped, nothing to do
 
-    foreach my $lun (@{$SETTINGS->{luns}}) {
-        if ($lun->{Path} eq $path) {
-            @params = ('--lld', 'iscsi', '--op', 'delete', '--mode', 'logicalunit', "--tid $tid", "--lun $lun->{lun}");
-            $res = $execute_command->($scfg, 'ssh', $timeout, $tgtadm, @params);
-            if ($res->{result}) {
-                $free_lu_name->($lun->{lun});
-                last;
-            } else {
-                die $res->{msg};
-            }
-        }
-    }
-    # update config 
-    my $tgtovadm = "'/usr/sbin/tgt-ovadmin --dump > /etc/tgt/targets.conf'";
-    @params = ("");
-    $execute_command->($scfg, 'legacy', undef, $tgtovadm);
-    return $res->{msg};
+    $delete_logical_unit->($scfg, $timeout, $lun->{lun});
+    $update_config->($scfg);
+
+    return '';
 };
 
 my $import_lun = sub {
@@ -336,43 +210,28 @@ my $import_lun = sub {
     return $create_lun->($scfg, $timeout, $method, @params);
 };
 
+# tgt has no online resize: the LU is removed and re-added so that it picks up
+# the new zvol size. params: (new size, lu name == backing path)
 my $modify_lun = sub {
     my ($scfg, $timeout, $method, @params) = @_;
-    my $lun;
-    my $res;
 
     my $path = $params[1];
-    my $tid = $get_target_tid->($scfg);
+    my $lun = $find_lun->($path);
+    die "$path: LUN not found\n" if !$lun;
 
-    foreach my $cfg (@{$SETTINGS->{luns}}) {
-        if ($cfg->{Path} eq $path) {
-            $lun = $cfg;
-            last;
-        }
+    $delete_logical_unit->($scfg, $timeout, $lun->{lun});
+    $set_flags->($scfg, $timeout, $path, 0);
+
+    eval { $add_logical_unit->($scfg, $timeout, $lun->{lun}, $path); };
+    if (my $err = $@) {
+        $update_config->($scfg);
+        die "failed to re-add LUN $lun->{lun} for $path after resize, the disk is unmapped: $err";
     }
-    @params = ('--lld', 'iscsi', '--op', 'delete', '--mode', 'logicalunit', "--tid $tid", "--lun $lun->{lun}");
-    $res = $execute_command->($scfg, 'ssh', $timeout, $tgtadm, @params);
-    die $res->{msg} unless $res->{result};
-    # ovios flags
-    my $target_name = $scfg->{target};
-    my @dataset = split'/', $path;
-    my $ds = "$dataset[-2]/$dataset[-1]";
-	# ovios unmap lun
-    my $zfs = "/usr/sbin/zfs";
-    @params = (" set lun:mapped=no lun:type=none lun:id=none lun:tg-name=none $ds");
-    $execute_command->($scfg, 'ssh', $timeout, $zfs, @params);
-    $path = "$lun->{Path}";
-    @params = ('--lld', 'iscsi', '--op', 'new','--mode', 'logicalunit',  "--tid $tid", "--lun $lun->{lun}", '-b', $path);
-    $res = $execute_command->($scfg, 'ssh', $timeout, $tgtadm, @params);
-    die $res->{msg} unless $res->{result};
-	# ovios map lun
-    @params = (" set lun:mapped=yes lun:type=proxmox lun:id=$lun->{lun} lun:tg-name=$target_name $ds");
-    $execute_command->($scfg, 'ssh', $timeout, $zfs, @params);
-	# update config 
-    my $tgtovadm = "'/usr/sbin/tgt-ovadmin --dump > /etc/tgt/targets.conf'";
-    @params = ("");
-    $execute_command->($scfg, 'legacy', undef, $tgtovadm);
-    return $res->{msg};
+
+    $set_flags->($scfg, $timeout, $path, 1, $lun->{lun});
+    $update_config->($scfg);
+
+    return '';
 };
 
 my $add_view = sub {
@@ -402,8 +261,8 @@ my $get_lun_cmd_map = sub {
 sub run_lun_command {
     my ($scfg, $timeout, $method, @params) = @_;
 
-    $parser->($scfg) unless $SETTINGS;
     my $cmdmap = $get_lun_cmd_map->($method);
+    $SETTINGS = $parse_config->($scfg);
     my $msg = $cmdmap->{cmd}->($scfg, $timeout, $method, @params);
 
     return $msg;
@@ -414,5 +273,3 @@ sub get_base {
 }
 
 1;
-
-
