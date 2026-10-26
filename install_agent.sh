@@ -34,7 +34,7 @@ else
         my $n = 0;
         $n += s/^(use PVE::Storage::LunCmd::LIO;\n)/$1use PVE::Storage::LunCmd::OviOSiSCSI;\n/m;
         $n += s/(Available \[[^\]]*?)\]/$1, OVIOS]/;
-        $n += s/^([ \t]*)(\} elsif \(\$scfg->\{iscsiprovider\} eq .LIO.\) \{\n[ \t]*return PVE::Storage::LunCmd::LIO::get_base;\n)/$1$2$1\} elsif (\$scfg->{iscsiprovider} eq \x27OVIOS\x27) {\n$1    return PVE::Storage::LunCmd::OviOSiSCSI::get_base;\n/m;
+        $n += s/^([ \t]*)(\} elsif \(\$scfg->\{iscsiprovider\} eq .LIO.\) \{\n[ \t]*return PVE::Storage::LunCmd::LIO::get_base(\(\$scfg\))?;\n)/$1$2$1\} elsif (\$scfg->{iscsiprovider} eq \x27OVIOS\x27) {\n$1    return PVE::Storage::LunCmd::OviOSiSCSI::get_base$3;\n/m;
         $n += s/^([ \t]*)(\} elsif \(\$scfg->\{iscsiprovider\} eq .LIO.\) \{\n[ \t]*\$msg = PVE::Storage::LunCmd::LIO::run_lun_command\([^\n]*\n)/$1$2$1\} elsif (\$scfg->{iscsiprovider} eq \x27OVIOS\x27) {\n$1    \$msg = PVE::Storage::LunCmd::OviOSiSCSI::run_lun_command(\$scfg, \$timeout, \$method, \@params);\n/m;
         die "ZFSPlugin.pm: expected 4 anchors, matched $n - file layout changed\n" if $n != 4;
     ' "$ZFS_PM"
