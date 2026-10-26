@@ -62,7 +62,7 @@ Replace `192.168.43.166` with your OviOS address.
 
 ```
 ovios-shell> options ssh.allow.root 1
-ovios-shell> services restart sshd
+ovios-shell> services ssh restart
 ```
 
 **On the Proxmox node:**
