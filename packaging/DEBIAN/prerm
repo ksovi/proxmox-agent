@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|purge)
+        /usr/share/ovios-pve-storage/ovios-pve-patch remove || true
+        systemctl try-restart pvedaemon.service pveproxy.service pvestatd.service || true
+        ;;
+esac
+
+exit 0

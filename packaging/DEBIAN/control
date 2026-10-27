@@ -1,0 +1,14 @@
+Package: ovios-pve-storage
+Version: @VERSION@
+Section: admin
+Priority: optional
+Architecture: all
+Depends: pve-manager, libpve-storage-perl, perl, openssh-client
+Maintainer: OviOS <ovi@ovios.org>
+Homepage: https://github.com/ksovi/proxmox-agent
+Description: OviOS iSCSI provider for Proxmox VE ZFS over iSCSI
+ Adds OviOS Linux as an iSCSI provider to the Proxmox VE "ZFS over iSCSI"
+ storage type, so VM disks can be created, resized and deleted as zvols on an
+ OviOS storage appliance. The package registers the provider in ZFSPlugin.pm
+ and the web UI, and re-applies those edits automatically whenever a Proxmox
+ upgrade replaces the files.

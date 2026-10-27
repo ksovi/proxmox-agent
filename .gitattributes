@@ -1,3 +1,5 @@
 *.sh text eol=lf
 *.pm text eol=lf
 *.js text eol=lf
+ovios-pve-patch text eol=lf
+packaging/DEBIAN/* text eol=lf

@@ -1,0 +1,2 @@
+interest-noawait /usr/share/perl5/PVE/Storage/ZFSPlugin.pm
+interest-noawait /usr/share/pve-manager/js/pvemanagerlib.js

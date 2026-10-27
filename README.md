@@ -23,10 +23,32 @@ The agent connects to the OviOS box as root over SSH and drives `tgtadm`, `zfs` 
 
 ## Install
 
-Run on **every Proxmox node** that will use the storage, as root:
+Run on **every Proxmox node** that will use the storage, as root.
+
+### Option 1: .deb package (recommended)
+
+Download `ovios-pve-storage_<version>_all.deb` from the
+[Releases](https://github.com/ksovi/proxmox-agent/releases) page, then:
 
 ```bash
-git clone <this repo> proxmox-agent
+apt install ./ovios-pve-storage_<version>_all.deb
+```
+
+The package installs the module, registers the `OVIOS` provider in `ZFSPlugin.pm` and the web UI,
+and restarts the PVE services. It also **re-applies the edits automatically** whenever a Proxmox
+upgrade replaces those files (via a dpkg trigger), so no manual re-install is needed after
+`apt dist-upgrade`. If a future Proxmox release changes the file layout so the edits can't be
+applied, the upgrade still succeeds and a warning is printed.
+
+Remove with `apt remove ovios-pve-storage`; this undoes the edits.
+
+Build it yourself with `./build-deb.sh [version]` (needs `dpkg-deb`), or push a `v*` tag and the
+GitHub Actions workflow builds it and attaches it to a release.
+
+### Option 2: install script
+
+```bash
+git clone https://github.com/ksovi/proxmox-agent
 cd proxmox-agent
 bash ./install_agent.sh
 ```
@@ -38,10 +60,11 @@ patch.
 
 Then hard-refresh the Proxmox web UI.
 
-> **Proxmox upgrades** replace `ZFSPlugin.pm` and `pvemanagerlib.js`. Re-run `install_agent.sh`
-> after each `pve-manager` / `libpve-storage-perl` upgrade.
+> With the script install, Proxmox upgrades replace `ZFSPlugin.pm` and `pvemanagerlib.js`. Re-run
+> `install_agent.sh` after each `pve-manager` / `libpve-storage-perl` upgrade (the .deb does this
+> for you).
 
-### Uninstall
+### Uninstall (script install)
 
 ```bash
 cp /usr/share/perl5/PVE/Storage/ZFSPlugin.pm.original /usr/share/perl5/PVE/Storage/ZFSPlugin.pm
@@ -143,4 +166,6 @@ pvesm add zfs ovios --portal 192.168.43.166 --pool tank \
 | File | Purpose |
 |---|---|
 | `OviOSiSCSI.pm` | the provider module |
-| `install_agent.sh` | installer (idempotent, anchor-based) |
+| `ovios-pve-patch` | applies/removes the edits to the Proxmox files (idempotent, anchor-based) |
+| `install_agent.sh` | manual installer |
+| `build-deb.sh`, `packaging/` | .deb package build |

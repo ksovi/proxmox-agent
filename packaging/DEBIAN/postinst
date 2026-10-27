@@ -1,0 +1,18 @@
+#!/bin/sh
+# configure: first install / upgrade. triggered: a Proxmox upgrade replaced the
+# files we patch. A failed patch must never break the apt transaction, so warn only.
+set -e
+
+case "$1" in
+    configure|triggered)
+        if /usr/share/ovios-pve-storage/ovios-pve-patch apply; then
+            # services pick up the new Perl/JS; try-restart is a no-op if not running
+            systemctl try-restart pvedaemon.service pveproxy.service pvestatd.service || true
+        else
+            echo "ovios-pve-storage: WARNING: could not patch Proxmox for the OVIOS provider." >&2
+            echo "ovios-pve-storage: Proxmox's files changed layout; please update this package." >&2
+        fi
+        ;;
+esac
+
+exit 0

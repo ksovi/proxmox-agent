@@ -1,0 +1,31 @@
+name: build-deb
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          [ "${GITHUB_REF_TYPE}" = "tag" ] || VERSION="0.0.0~ci${GITHUB_RUN_NUMBER}"
+          ./build-deb.sh "$VERSION"
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: dist/*.deb
+      - name: Attach to release
+        if: github.ref_type == 'tag'
+        run: gh release create "$GITHUB_REF_NAME" dist/*.deb --generate-notes || gh release upload "$GITHUB_REF_NAME" dist/*.deb --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

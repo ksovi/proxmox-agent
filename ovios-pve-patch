@@ -1,0 +1,93 @@
+#!/bin/bash
+# Registers (apply) or unregisters (remove) the OVIOS iSCSI provider in the
+# Proxmox VE files. Edits are anchor based, idempotent, and applied to a temp
+# copy first so a layout change can never leave a half-patched file behind.
+#
+# usage: ovios-pve-patch apply|remove
+
+set -e
+
+ZFS_PM="${ZFS_PM:-/usr/share/perl5/PVE/Storage/ZFSPlugin.pm}"
+PVE_JS="${PVE_JS:-/usr/share/pve-manager/js/pvemanagerlib.js}"
+
+# edit FILE PERL_PROGRAM: run the perl -0pi program on a temp copy, then write it back
+edit() {
+    local file="$1" prog="$2" tmp
+    tmp="$(mktemp)"
+    cp "$file" "$tmp"
+    if ! perl -0pi -e "$prog" "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    cat "$tmp" > "$file"   # keep owner/mode of the original
+    rm -f "$tmp"
+}
+
+apply_zfsplugin() {
+    if grep -q 'LunCmd::OviOSiSCSI' "$ZFS_PM"; then
+        echo "ZFSPlugin.pm: already patched"
+    else
+        echo "Patching ZFSPlugin.pm"
+        edit "$ZFS_PM" '
+            my $n = 0;
+            $n += s/^(use PVE::Storage::LunCmd::LIO;\n)/$1use PVE::Storage::LunCmd::OviOSiSCSI;\n/m;
+            $n += s/(Available \[[^\]]*?)\]/$1, OVIOS]/;
+            $n += s/^([ \t]*)(\} elsif \(\$scfg->\{iscsiprovider\} eq .LIO.\) \{\n[ \t]*return PVE::Storage::LunCmd::LIO::get_base(\(\$scfg\))?;\n)/$1$2$1\} elsif (\$scfg->{iscsiprovider} eq \x27OVIOS\x27) {\n$1    return PVE::Storage::LunCmd::OviOSiSCSI::get_base$3;\n/m;
+            $n += s/^([ \t]*)(\} elsif \(\$scfg->\{iscsiprovider\} eq .LIO.\) \{\n[ \t]*\$msg = PVE::Storage::LunCmd::LIO::run_lun_command\([^\n]*\n)/$1$2$1\} elsif (\$scfg->{iscsiprovider} eq \x27OVIOS\x27) {\n$1    \$msg = PVE::Storage::LunCmd::OviOSiSCSI::run_lun_command(\$scfg, \$timeout, \$method, \@params);\n/m;
+            die "ZFSPlugin.pm: expected 4 anchors, matched $n - file layout changed\n" if $n != 4;
+        '
+    fi
+
+    # Newer PVE (9.x) also resolves the zvol base path in on_add_hook, which dies for unknown providers.
+    if grep -q 'sub on_add_hook' "$ZFS_PM" && ! grep -q 'base_path = PVE::Storage::LunCmd::OviOSiSCSI' "$ZFS_PM"; then
+        echo "Patching ZFSPlugin.pm on_add_hook"
+        edit "$ZFS_PM" '
+            s/^([ \t]*)(\} elsif \(\$scfg->\{iscsiprovider\} eq .istgt.\) \{\n[ \t]*\$base_path = PVE::Storage::LunCmd::Istgt::get_base[^\n]*\n)/$1$2$1\} elsif (\$scfg->{iscsiprovider} eq \x27OVIOS\x27) {\n$1    \$base_path = PVE::Storage::LunCmd::OviOSiSCSI::get_base(\$scfg);\n/m
+                or die "ZFSPlugin.pm: on_add_hook anchor not found - file layout changed\n";
+        '
+    fi
+}
+
+apply_js() {
+    if grep -q "'OVIOS'" "$PVE_JS"; then
+        echo "pvemanagerlib.js: already patched"
+    else
+        echo "Patching pvemanagerlib.js"
+        edit "$PVE_JS" '
+            s/^([ \t]*)(\[\x27LIO\x27, \x27LIO\x27\],\n)/$1$2$1\[\x27OVIOS\x27, \x27OviOS\x27\],\n/m
+                or die "pvemanagerlib.js: LIO anchor not found\n";
+        '
+    fi
+}
+
+remove_all() {
+    if [ -f "$ZFS_PM" ] && grep -q 'OviOSiSCSI\|OVIOS' "$ZFS_PM"; then
+        echo "Unpatching ZFSPlugin.pm"
+        edit "$ZFS_PM" '
+            s/^use PVE::Storage::LunCmd::OviOSiSCSI;\n//m;
+            s/, OVIOS\]/]/;
+            s/^[ \t]*\} elsif \(\$scfg->\{iscsiprovider\} eq \x27OVIOS\x27\) \{\n[^\n]*\n//mg;
+        '
+    fi
+    if [ -f "$PVE_JS" ] && grep -q "'OVIOS'" "$PVE_JS"; then
+        echo "Unpatching pvemanagerlib.js"
+        edit "$PVE_JS" 's/^[ \t]*\[\x27OVIOS\x27, \x27OviOS\x27\],\n//m;'
+    fi
+}
+
+case "${1:-}" in
+    apply)
+        for f in "$ZFS_PM" "$PVE_JS"; do
+            [ -f "$f" ] || { echo "Missing $f - is this a Proxmox VE node?" >&2; exit 1; }
+        done
+        apply_zfsplugin
+        apply_js
+        ;;
+    remove)
+        remove_all
+        ;;
+    *)
+        echo "usage: $0 apply|remove" >&2
+        exit 2
+        ;;
+esac
